@@ -1,0 +1,1 @@
+clang++ -std=c++17 main.cpp Simulator1D.cpp Simulator2D.cpp DataParser.cpp -o diffusion_sim -I/opt/homebrew/include -L/opt/homebrew/lib -lraylib -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo && ./diffusion_sim
