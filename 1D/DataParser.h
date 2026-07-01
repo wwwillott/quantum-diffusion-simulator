@@ -2,12 +2,18 @@
 #include <string>
 #include <vector>
 
-// The clean data container
 struct ViralHotspot {
     float lat;
     float lon;
-    int confirmed_cases; 
+    std::vector<int> cases_history; 
 };
 
-// The parser function declaration
-std::vector<ViralHotspot> ParseDiseaseData(const std::string& filepath, int time_step_mode);
+struct GeoNode {
+    float lat;
+    float lon;
+    int population;
+};
+
+// Function declarations
+std::vector<ViralHotspot> ParseDiseaseData(const std::string& filepath, int time_step_mode, int start_day_index);
+std::vector<GeoNode> ParsePopulationData(const std::string& filepath);

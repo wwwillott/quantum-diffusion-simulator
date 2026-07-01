@@ -17,11 +17,10 @@ private:
     std::vector<std::complex<float>> next_beta;
     
     std::vector<float> std_dev_history;
-    SimConfig config;
-
     void applyInitialState();
 
 public:
+    SimConfig config;
     Simulator1D(SimConfig master_settings);
     void update();
     void draw(int screen_width, int screen_height, bool show_info = false);

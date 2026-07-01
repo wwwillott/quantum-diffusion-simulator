@@ -45,6 +45,15 @@ void Simulator1D::applyInitialState() {
 void Simulator1D::update() {
     // --- PHYSICS ENGINE ---
     if (config.mode == SimMode::CLASSICAL) {
+        float current_sum = 0.0f;
+        for (float p : classical_p) current_sum += p;
+        
+        if (current_sum < 0.0001f) {
+            for (int i = 0; i < config.resolution; i++) {
+                classical_p[i] = std::norm(alpha[i]) + std::norm(beta[i]);
+            }
+        }
+
         for (int i = 1; i < config.resolution - 1; i++) {
             float p = classical_p[i];
             float p_left = classical_p[i - 1];

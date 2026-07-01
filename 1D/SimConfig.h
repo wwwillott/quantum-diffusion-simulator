@@ -1,9 +1,28 @@
 #pragma once
 
+enum class SystemType { 
+    CLOSED_UNITARY, 
+    OPEN
+};
+
 enum class SimMode {
     CLASSICAL,
     QUANTUM,
     QUANTUM_SEARCH
+};
+
+// Coins Available
+// List A: The Pure Physics Coins
+enum class UnitaryCoin2D { 
+    GROVER, 
+    DFT, 
+    HADAMARD_TENSOR,
+    ALTERNATING_DFT 
+};
+
+// List B: The Epidemiology Coins
+enum class NonUnitaryCoin2D { 
+    EPIDEMIC_SCALAR 
 };
 
 // 1D Specific
@@ -17,7 +36,9 @@ enum class CoinState {
 enum class InitialState2D {
     PURE_NORTH,
     UNIFORM,
-    ALTERNATING_PHASE
+    ALTERNATING_PHASE,
+    CHIRAL_WEST,
+    HADAMARD_SYMMETRIC
 };
 
 // Boundary Types for both
@@ -36,6 +57,9 @@ struct SimConfig {
     CoinState initial_coin;        
     InitialState2D init_state_2d;  
     BoundaryType boundary_condition;
+    SystemType system_type_2d = SystemType::CLOSED_UNITARY;
+    UnitaryCoin2D unitary_coin = UnitaryCoin2D::GROVER;
+    NonUnitaryCoin2D non_unitary_coin = NonUnitaryCoin2D::EPIDEMIC_SCALAR;
     
     int wave_start_pos;
     int target_position;
@@ -48,4 +72,7 @@ struct SimConfig {
     float max_lat = 90.0f;
     float min_lon = -180.0f;
     float max_lon = 180.0f;
+
+    // Virus Timeline Control
+    int start_day_index = 30; // Default to Day 30
 };

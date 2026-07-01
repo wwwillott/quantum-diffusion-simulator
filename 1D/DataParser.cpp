@@ -1,90 +1,156 @@
 #include "DataParser.h"
 #include <fstream>
+#include <sstream>
 #include <iostream>
+#include <algorithm>
 
-std::vector<ViralHotspot> ParseDiseaseData(const std::string& filepath, int time_step_mode) {
-    std::vector<ViralHotspot> hotspots;
+// Helper function to safely split CSV lines that contain quotation marks
+std::vector<std::string> split_csv_line(const std::string& line) {
+    std::vector<std::string> result;
+    std::string current_field;
+    bool inside_quotes = false;
+
+    for (char c : line) {
+        if (c == '\"') {
+            inside_quotes = !inside_quotes;
+        } else if (c == ',' && !inside_quotes) {
+            result.push_back(current_field);
+            current_field.clear();
+        } else {
+            current_field += c;
+        }
+    }
+    result.push_back(current_field);
+    return result;
+}
+
+std::vector<ViralHotspot> ParseDiseaseData(const std::string& filepath, int timeStepMode, int start_day_index) {
+    std::vector<ViralHotspot> dataset;
     std::ifstream file(filepath);
-    std::string line;
-
+    
     if (!file.is_open()) {
-        std::cerr << "ERROR: Could not open dataset at " << filepath << std::endl;
-        return hotspots; // Return empty if file fails
+        std::cerr << "CRITICAL ERROR: Could not open JHU dataset at " << filepath << std::endl;
+        return dataset;
     }
 
-    // 1. Skip the Header Row
-    std::getline(file, line); 
+    std::string line;
+    
+    if (!std::getline(file, line)) return dataset;
+    
+    std::vector<std::string> headers = split_csv_line(line);
+    int lat_idx = -1;
+    int lon_idx = -1;
+    int first_date_idx = -1;
 
-    // 2. Read line by line
+    for (size_t i = 0; i < headers.size(); i++) {
+        std::string h = headers[i];
+        h.erase(std::remove(h.begin(), h.end(), '\r'), h.end()); 
+        
+        if (h == "Lat") lat_idx = i;
+        else if (h == "Long" || h == "Long_") lon_idx = i;
+        
+        if (first_date_idx == -1 && !h.empty() && std::isdigit(h[0])) {
+            first_date_idx = i;
+        }
+    }
+
+    if (lat_idx == -1 || lon_idx == -1 || first_date_idx == -1) {
+        std::cerr << "CRITICAL ERROR: Failed to map JHU columns. Check CSV format." << std::endl;
+        return dataset;
+    }
+
     while (std::getline(file, line)) {
-        std::vector<std::string> columns;
-        std::string current_cell = "";
-        bool in_quotes = false;
+        if (line.empty()) continue;
 
-        // 3. The State-Machine Tokenizer
-        for (char c : line) {
-            if (c == '"') {
-                in_quotes = !in_quotes; 
-            } 
-            else if (c == ',' && !in_quotes) {
-                columns.push_back(current_cell);
-                current_cell = "";
-            } 
-            else {
-                current_cell += c;
+        std::vector<std::string> fields = split_csv_line(line);
+        if (fields.size() <= first_date_idx) continue;
+
+        try {
+            if (fields[lat_idx].empty() || fields[lon_idx].empty()) continue;
+
+            ViralHotspot spot;
+            spot.lat = std::stof(fields[lat_idx]);
+            spot.lon = std::stof(fields[lon_idx]);
+            
+            // --- NEW: THE FULL TIMELINE EXTRACTION ---
+            int seed_day_index = first_date_idx + start_day_index;
+            if (seed_day_index >= fields.size()) seed_day_index = fields.size() - 1;
+            if (seed_day_index < first_date_idx) seed_day_index = first_date_idx;
+            
+            bool has_cases = false;
+            
+            // Scrape every single remaining day in the CSV
+            for (size_t col = seed_day_index; col < fields.size(); col++) {
+                std::string cases_str = fields[col];
+                cases_str.erase(std::remove(cases_str.begin(), cases_str.end(), '\r'), cases_str.end());
+                
+                int count = cases_str.empty() ? 0 : std::stoi(cases_str);
+                spot.cases_history.push_back(count);
+                
+                if (count > 0) has_cases = true;
             }
-        }
-        columns.push_back(current_cell); 
 
-        // 4. Data Extraction & Safety Checks
-        if (columns.size() == 3) {
-            // It's our custom test file format: [0]Lat, [1]Lon, [2]Cases
-            try {
-                float lat = std::stof(columns[0]);
-                float lon = std::stof(columns[1]);
-                int cases = std::stoi(columns[2]);
-                hotspots.push_back({lat, lon, cases});
-            } 
-            catch (...) { continue; }
-        }
-        else if (columns.size() > 4) {
-            // It's the standard JHU format: [0]Prov, [1]Country, [2]Lat, [3]Lon, [4+]Dates
-            if (columns[2].empty() || columns[3].empty()) continue;
-
-            try {
-                float lat = std::stof(columns[2]);
-                float lon = std::stof(columns[3]);
-                
-                // --- THE TRUE DELTA AGGREGATOR ---
-                // (No more random numbers!)
-                int start_col = 4; // The first day of recorded data
-                int step_size = 1; // Default to Daily
-                
-                if (time_step_mode == 1) step_size = 7; // Weekly
-                else if (time_step_mode == 2) step_size = 30; // Monthly
-                
-                int end_col = start_col + step_size;
-                
-                // Safety check: Make sure the CSV actually has enough days
-                if (end_col >= columns.size()) {
-                    end_col = columns.size() - 1; 
-                }
-
-                int start_cases = std::stoi(columns[start_col]);
-                int end_cases = std::stoi(columns[end_col]);
-                
-                // Calculate the true delta (new cases only)
-                int new_cases = end_cases - start_cases;
-                
-                // JHU occasionally adjusts case counts downward. 
-                // Clamp it to 0 so we don't inject negative probabilities.
-                if (new_cases < 0) new_cases = 0;
-
-                hotspots.push_back({lat, lon, new_cases});
-            } 
-            catch (...) { continue; }
+            if (has_cases) {
+                dataset.push_back(spot);
+            }
+        } 
+        catch (const std::exception& e) {
+            continue;
         }
     }
 
-    return hotspots;
+    return dataset;
+}
+
+std::vector<GeoNode> ParsePopulationData(const std::string& filepath) {
+    std::vector<GeoNode> dataset;
+    std::ifstream file(filepath);
+    
+    if (!file.is_open()) {
+        std::cerr << "CRITICAL ERROR: Could not open Population dataset at " << filepath << std::endl;
+        return dataset;
+    }
+
+    std::string line;
+    if (!std::getline(file, line)) return dataset;
+    
+    std::vector<std::string> headers = split_csv_line(line);
+    int lat_idx = -1;
+    int lon_idx = -1;
+    int pop_idx = -1;
+
+    for (size_t i = 0; i < headers.size(); i++) {
+        std::string h = headers[i];
+        h.erase(std::remove(h.begin(), h.end(), '\r'), h.end()); 
+        
+        if (h == "Lat") lat_idx = i;
+        else if (h == "Long" || h == "Long_") lon_idx = i;
+        else if (h == "Population") pop_idx = i;
+    }
+
+    if (lat_idx == -1 || lon_idx == -1 || pop_idx == -1) return dataset;
+
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        std::vector<std::string> fields = split_csv_line(line);
+        
+        int max_req_idx = std::max({lat_idx, lon_idx, pop_idx});
+        if (fields.size() <= max_req_idx) continue;
+
+        try {
+            if (fields[lat_idx].empty() || fields[lon_idx].empty() || fields[pop_idx].empty()) continue;
+
+            GeoNode node;
+            node.lat = std::stof(fields[lat_idx]);
+            node.lon = std::stof(fields[lon_idx]);
+            
+            std::string pop_str = fields[pop_idx];
+            pop_str.erase(std::remove(pop_str.begin(), pop_str.end(), '\r'), pop_str.end());
+            
+            node.population = std::stoi(pop_str);
+            if (node.population > 0) dataset.push_back(node);
+        } 
+        catch (const std::exception& e) { continue; }
+    }
+    return dataset;
 }

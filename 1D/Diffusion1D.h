@@ -20,11 +20,11 @@ class Diffusion1D {
 private:
     std::vector<float> probabilities;
     std::vector<float> next_probabilities;
-    SimConfig config;
 
     void applyInitialState();
 
 public:
+    SimConfig config;
     Diffusion1D(SimConfig master_settings);
     void update();
     void draw(int screen_width, int screen_height);
