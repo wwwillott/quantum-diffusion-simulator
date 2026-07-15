@@ -75,4 +75,13 @@ struct SimConfig {
 
     // Virus Timeline Control
     int start_day_index = 30; // Default to Day 30
+    int quantum_ticks_per_real_tick = 1; // Ratio for sim tick to real time
+
+    // Nodal Retention Parameters
+    bool nodal_retention = true; 
+    float mobility_rate = 0.10f; // 10% of the wave moves, 90% stays
+
+    // Epidemiological Scaling Parameters
+    float base_survival_rate = 0.95f;
+    float urban_multiplier = 0.20f;
 };
