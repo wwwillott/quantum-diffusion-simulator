@@ -48,6 +48,7 @@ public:
     
     // Telemetry Variables
     bool show_metrics_menu = false;
+    bool show_mode_menu = false;
     bool track_masked_mse = false;
     bool track_emd = false;
     

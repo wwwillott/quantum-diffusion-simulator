@@ -91,16 +91,26 @@ int main() {
                 else sim1D = Simulator1D(mySettings);
                 isPaused = true; 
             }
-            if (IsKeyPressed(KEY_M)) {
-                mySettings.mode = (mySettings.mode == SimMode::QUANTUM) ? SimMode::CLASSICAL : SimMode::QUANTUM;
-                if (is2DMode) sim2D.config.mode = mySettings.mode; 
-                else sim1D.config.mode = mySettings.mode; 
-                isPaused = false; 
+            // --- NEW: Engine Mode Menu Logic ---
+            if (is2DMode && IsKeyPressed(KEY_M)) {
+                sim2D.show_mode_menu = !sim2D.show_mode_menu;
+                // Auto-pause if EITHER menu is open
+                isPaused = (sim2D.show_mode_menu || sim2D.show_metrics_menu); 
             }
-            // --- NEW: Metrics Menu Logic ---
+            if (is2DMode && sim2D.show_mode_menu) {
+                if (IsKeyPressed(KEY_ONE)) {
+                    mySettings.mode = SimMode::QUANTUM;
+                    sim2D.config.mode = SimMode::QUANTUM;
+                }
+                if (IsKeyPressed(KEY_TWO)) {
+                    mySettings.mode = SimMode::CLASSICAL;
+                    sim2D.config.mode = SimMode::CLASSICAL;
+                }
+            }
+            // Metrics Menu Logic
             if (is2DMode && IsKeyPressed(KEY_Z)) {
                 sim2D.show_metrics_menu = !sim2D.show_metrics_menu;
-                isPaused = sim2D.show_metrics_menu; // Auto-pause while menu is open
+                isPaused = (sim2D.show_mode_menu || sim2D.show_metrics_menu); // Auto-pause while menu is open
             }
             if (is2DMode && sim2D.show_metrics_menu) {
                 if (IsKeyPressed(KEY_ONE)) sim2D.track_masked_mse = !sim2D.track_masked_mse;

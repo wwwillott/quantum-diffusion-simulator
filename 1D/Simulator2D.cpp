@@ -202,21 +202,49 @@ void Simulator2D::update() {
     }
 
     else if (config.mode == SimMode::CLASSICAL) {
-        // --- NEW: CLASSICAL DIFFUSION ENGINE ---
         for (int i = 0; i < total_nodes; i++) {
-            float p = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) + std::norm(amp_W[i]);
+            // 1. Sum total probability at this node (including the resident pool)
+            float current_p = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) + std::norm(amp_W[i]) + std::norm(amp_C[i]);
+            
+            float effective_R0 = 1.0f;
 
+            // 2. Apply Logistic Dampener if in OPEN system
             if (config.system_type_2d == SystemType::OPEN) {
-                p *= node_growth_rate[i];
+                float local_R0 = node_growth_rate[i];
+                float simulated_humans = current_p * max_seed_cases;
+                float capacity = node_capacity[i];
+
+                if (capacity > 0.0f) {
+                    float saturation = simulated_humans / capacity;
+                    effective_R0 = local_R0 * std::max(0.0f, 1.0f - saturation);
+                } else {
+                    effective_R0 = 0.0f; // Dead zones
+                }
             }
 
-            float next_p_dir = p * 0.25f;
-            float out_amp = std::sqrt(next_p_dir);
-            
-            amp_N[i] = { out_amp, 0.0f };
-            amp_S[i] = { out_amp, 0.0f };
-            amp_E[i] = { out_amp, 0.0f };
-            amp_W[i] = { out_amp, 0.0f };
+            // Apply growth/decay scalar
+            float next_total_p = current_p * effective_R0;
+
+            // 3. Handle Nodal Retention vs Full Diffusion
+            if (config.nodal_retention) {
+                float stay_p = next_total_p * (1.0f - config.mobility_rate);
+                float move_p = next_total_p * config.mobility_rate;
+                float dir_p = move_p * 0.25f; // Split moving population 4 ways
+
+                amp_C[i] = { std::sqrt(stay_p), 0.0f };
+                amp_N[i] = { std::sqrt(dir_p), 0.0f };
+                amp_S[i] = { std::sqrt(dir_p), 0.0f };
+                amp_E[i] = { std::sqrt(dir_p), 0.0f };
+                amp_W[i] = { std::sqrt(dir_p), 0.0f };
+            } else {
+                float dir_p = next_total_p * 0.25f; // Split all population 4 ways
+
+                amp_C[i] = { 0.0f, 0.0f };
+                amp_N[i] = { std::sqrt(dir_p), 0.0f };
+                amp_S[i] = { std::sqrt(dir_p), 0.0f };
+                amp_E[i] = { std::sqrt(dir_p), 0.0f };
+                amp_W[i] = { std::sqrt(dir_p), 0.0f };
+            }
         }
     }
 
@@ -536,6 +564,27 @@ void Simulator2D::draw(int screen_width, int screen_height, bool show_info, bool
         DrawText("[3] Historical Overlay (Red Map)", menu_x + 80, menu_y + 150, 20, col3);
 
         DrawText("Press Z to close and resume", menu_x + menu_w/2 - MeasureText("Press Z to close and resume", 15)/2, menu_y + 200, 15, LIGHTGRAY);
+    }
+    // DRAW THE ENGINE MODE MENU
+    if (show_mode_menu) {
+        int menu_w = 450;
+        int menu_h = 200; 
+        int menu_x = (screen_width - menu_w) / 2;
+        int menu_y = (screen_height - menu_h) / 2;
+
+        DrawRectangle(0, 0, screen_width, screen_height, { 10, 10, 10, 150 }); 
+        DrawRectangle(menu_x, menu_y, menu_w, menu_h, { 40, 25, 30, 255 }); // Slight red tint
+        DrawRectangleLines(menu_x, menu_y, menu_w, menu_h, { 200, 100, 100, 255 });
+
+        DrawText("COMPUTE ENGINE SELECTION", menu_x + menu_w/2 - MeasureText("COMPUTE ENGINE SELECTION", 20)/2, menu_y + 20, 20, WHITE);
+        
+        Color col1 = (config.mode == SimMode::QUANTUM) ? Color{ 255, 100, 100, 255 } : GRAY;
+        DrawText("[1] Quantum Walk Virtual Machine", menu_x + 50, menu_y + 80, 20, col1);
+
+        Color col2 = (config.mode == SimMode::CLASSICAL) ? Color{ 255, 100, 100, 255 } : GRAY;
+        DrawText("[2] Classical Diffusion Engine", menu_x + 50, menu_y + 120, 20, col2);
+
+        DrawText("Press M to close and resume", menu_x + menu_w/2 - MeasureText("Press M to close and resume", 15)/2, menu_y + 170, 15, LIGHTGRAY);
     }
 }
 
