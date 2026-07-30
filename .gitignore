@@ -10,6 +10,7 @@
 1D/results/
 1D/optimizer/.venv/
 1D/optimizer/.pytest_cache/
+1D/optimizer/data/.landscape_cache/
 1D/optimizer/**/*.egg-info/
 1D/optimizer/**/__pycache__/
 *.o
