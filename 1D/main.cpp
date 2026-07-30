@@ -2,6 +2,7 @@
 #include "SimConfig.h"
 #include "Simulator1D.h"
 #include "Simulator2D.h"
+#include "Simulator2DRenderer.h"
 #include "DataParser.h"
 
 enum class AppState { DIMENSION_SELECT, MAIN_MENU, SETUP_SANDBOX, SETUP_2D_SANDBOX, SETUP_FIREBREAK, SETUP_SEARCH, SIMULATION, VIRUS_DATASET_SELECT, VIRUS_CONFIG_SETUP };
@@ -268,9 +269,9 @@ int main() {
             }
         }
         else if (currentState == AppState::VIRUS_CONFIG_SETUP) {
-            // Exactly 13 options (indices 0 to 12)
-            if (IsKeyPressed(KEY_DOWN)) virusConfigSelection = (virusConfigSelection + 1) % 13;
-            if (IsKeyPressed(KEY_UP)) virusConfigSelection = (virusConfigSelection - 1 + 13) % 13;
+            // Exactly 14 options (indices 0 to 13)
+            if (IsKeyPressed(KEY_DOWN)) virusConfigSelection = (virusConfigSelection + 1) % 14;
+            if (IsKeyPressed(KEY_UP)) virusConfigSelection = (virusConfigSelection - 1 + 14) % 14;
             if (IsKeyPressed(KEY_D)) currentState = AppState::MAIN_MENU;
 
             int slideSpeed = IsKeyDown(KEY_LEFT_SHIFT) ? 50 : 10;
@@ -334,13 +335,18 @@ int main() {
                 if (IsKeyPressed(KEY_RIGHT)) mySettings.urban_multiplier += slideAmount;
                 if (IsKeyPressed(KEY_LEFT)) mySettings.urban_multiplier -= slideAmount;
             }
-            // 11. Time Scale
+            // 11. Time Scale (quantum ticks per calendar day)
             if (virusConfigSelection == 11) {
                 if (IsKeyPressed(KEY_RIGHT)) mySettings.quantum_ticks_per_real_tick++;
                 if (IsKeyPressed(KEY_LEFT) && mySettings.quantum_ticks_per_real_tick > 1) mySettings.quantum_ticks_per_real_tick--;
             }
-            // 12. Boot Simulator
-            if (IsKeyPressed(KEY_ENTER) && virusConfigSelection == 12) {
+            // 12. Days per sim tick (slower than real time when > 1)
+            if (virusConfigSelection == 12) {
+                if (IsKeyPressed(KEY_RIGHT)) mySettings.days_per_tick++;
+                if (IsKeyPressed(KEY_LEFT) && mySettings.days_per_tick > 1) mySettings.days_per_tick--;
+            }
+            // 13. Boot Simulator
+            if (IsKeyPressed(KEY_ENTER) && virusConfigSelection == 13) {
                 mySettings.mode = SimMode::QUANTUM;
                 mySettings.system_type_2d = SystemType::OPEN;
                 
@@ -355,7 +361,8 @@ int main() {
                     mySettings.min_lon = -10.0f; mySettings.max_lon = 30.0f;
                 }
                 
-                std::string target_file = "data/time_series_covid19_confirmed_us.csv";
+                std::string target_file = "data/time_series_covid19_confirmed_US.csv";
+                mySettings.landscape_path = "data/nasa_pop.asc";
                 std::vector<ViralHotspot> raw_data = ParseDiseaseData(target_file, timeStepMode, mySettings.start_day_index);
                 
                 sim2D = Simulator2D(mySettings);
@@ -383,7 +390,7 @@ int main() {
             if (is2DMode) {
                 Vector2 mousePos = GetMousePosition();
                 bool isMouseDown = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-                sim2D.draw(screenWidth, screenHeight, showInfoOverlay, isPaused, mousePos, isMouseDown);
+                DrawSimulator2D(sim2D, screenWidth, screenHeight, showInfoOverlay, isPaused, mousePos, isMouseDown);
             }
             else sim1D.draw(screenWidth, screenHeight, showInfoOverlay);
 
@@ -578,7 +585,10 @@ int main() {
             DrawText("TIME SCALE RATIO:", col1, start_y + y_step*11, 20, (virusConfigSelection == 11) ? YELLOW : GRAY);
             DrawText(TextFormat("< %d Quantum Ticks / Day >", mySettings.quantum_ticks_per_real_tick), col2, start_y + y_step*11, 20, (virusConfigSelection == 11) ? WHITE : LIGHTGRAY);
 
-            DrawText("[ BOOT SIMULATOR ]", screenWidth/2 - MeasureText("[ BOOT SIMULATOR ]", 20)/2, start_y + y_step*13, 20, (virusConfigSelection == 12) ? GREEN : GRAY);
+            DrawText("DAYS PER SIM TICK:", col1, start_y + y_step*12, 20, (virusConfigSelection == 12) ? YELLOW : GRAY);
+            DrawText(TextFormat("< %d Real Day(s) / Tick >", mySettings.days_per_tick), col2, start_y + y_step*12, 20, (virusConfigSelection == 12) ? WHITE : LIGHTGRAY);
+
+            DrawText("[ BOOT SIMULATOR ]", screenWidth/2 - MeasureText("[ BOOT SIMULATOR ]", 20)/2, start_y + y_step*13, 20, (virusConfigSelection == 13) ? GREEN : GRAY);
             DrawText("Hold SHIFT to adjust numbers faster", screenWidth/2 - MeasureText("Hold SHIFT to adjust numbers faster", 15)/2, start_y + y_step*14, 15, LIGHTGRAY);
         }
         else {

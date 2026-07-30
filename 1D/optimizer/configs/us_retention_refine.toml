@@ -1,0 +1,64 @@
+# Retention-on refine sweep.
+# Focus: mobility × survival, survival × urban, and init_state
+# (ALTERNATING_PHASE vs HADAMARD_SYMMETRIC). Clock knobs kept in a
+# narrow band; coin/boundary/resolution held fixed.
+#
+# Seeded from us_retention_sweep Pareto knee. Pilot explores the joint
+# space; OFAT then expands around the new knee.
+
+[run]
+dataset = "../../data/time_series_covid19_confirmed_US.csv"
+landscape = "../../data/nasa_pop.asc"
+start_date = "2/21/20"
+end_date = "6/30/20"
+min_lat = 24.0
+max_lat = 50.0
+min_lon = -125.0
+max_lon = -66.0
+headless_bin = "../../headless_runner"
+results_dir = "../../results/us_retention_refine"
+jobs = 4
+export_fields = true
+
+[baseline]
+# Previous retention-on knee (us_retention_sweep).
+resolution = 100
+mobility_rate = 0.3
+base_survival_rate = 1.0
+urban_multiplier = 0.2
+ticks_per_day = 3
+days_per_tick = 3
+nodal_retention = true
+unitary_coin = "HADAMARD_TENSOR"
+init_state = "ALTERNATING_PHASE"
+boundary = "ABSORBING"
+
+[pilot]
+enabled = true
+# More samples than us_retention_sweep: fewer free axes, denser coverage
+# of mobility/survival/urban/init interactions.
+n_samples = 192
+seed = 7
+
+[sinkhorn]
+reg = 0.1
+num_iter_max = 2000
+stop_threshold = 1.0e-6
+eval_resolution = 50
+
+[ofat]
+# Narrowed around the retention-on knee (growth × transport).
+mobility_rate = { start = 0.15, stop = 0.45, step = 0.05 }
+base_survival_rate = { start = 0.90, stop = 1.10, step = 0.025 }
+urban_multiplier = { start = 0.10, stop = 0.35, step = 0.05 }
+# Clock interaction band (still OFAT'd after pilot).
+ticks_per_day = { values = [1, 2, 3, 4, 5] }
+days_per_tick = { values = [1, 2, 3, 4] }
+# Init side study: the two candidates that matter under retention.
+init_state = { values = ["ALTERNATING_PHASE", "HADAMARD_SYMMETRIC"] }
+# Fixed (not OFAT'd): nodal_retention=true, unitary_coin, boundary, resolution
+
+[resolution_study]
+# Already characterized in us_retention_sweep; skip to save runtime.
+enabled = false
+values = [100]

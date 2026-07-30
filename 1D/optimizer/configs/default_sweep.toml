@@ -1,0 +1,52 @@
+[run]
+dataset = "../../data/test_mini_jhu.csv"
+landscape = "../../data/missing_for_synthetic_fallback.asc"
+# For mini fixture dates use Day labels; for JHU US use calendar dates e.g. "2/21/20"
+start_date = "Day1"
+end_date = "Day8"
+min_lat = 24.0
+max_lat = 50.0
+min_lon = -125.0
+max_lon = -66.0
+headless_bin = "../../headless_runner"
+results_dir = "../../results/sweeps"
+jobs = 1
+export_fields = true
+
+[baseline]
+resolution = 20
+mobility_rate = 0.10
+base_survival_rate = 0.95
+urban_multiplier = 0.20
+ticks_per_day = 1
+days_per_tick = 1
+nodal_retention = true
+unitary_coin = "GROVER"
+init_state = "ALTERNATING_PHASE"
+boundary = "ABSORBING"
+
+[pilot]
+enabled = true
+n_samples = 8
+seed = 42
+
+[sinkhorn]
+reg = 0.1
+num_iter_max = 2000
+stop_threshold = 1.0e-6
+eval_resolution = 20
+
+[ofat]
+mobility_rate = { start = 0.0, stop = 0.50, step = 0.10 }
+base_survival_rate = { start = 0.80, stop = 1.20, step = 0.10 }
+urban_multiplier = { start = 0.0, stop = 0.50, step = 0.10 }
+ticks_per_day = { values = [1, 2, 4] }
+days_per_tick = { values = [1, 2, 3, 4] }
+unitary_coin = { values = ["GROVER", "DFT", "HADAMARD_TENSOR", "ALTERNATING_DFT"] }
+init_state = { values = ["PURE_NORTH", "UNIFORM", "ALTERNATING_PHASE", "CHIRAL_WEST", "HADAMARD_SYMMETRIC"] }
+boundary = { values = ["ABSORBING", "REFLECTIVE"] }
+nodal_retention = { values = [true, false] }
+
+[resolution_study]
+enabled = true
+values = [16, 20, 32]

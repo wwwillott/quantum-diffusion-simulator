@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantum-sweep"
+version = "0.1.0"
+description = "Headless OFAT / pilot sweep tool for the 2D quantum epidemic simulator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "matplotlib>=3.7",
+  "pot>=0.9.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+quantum-sweep = "quantum_sweep.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quantum_sweep*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

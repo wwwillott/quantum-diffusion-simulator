@@ -1,0 +1,51 @@
+[run]
+dataset = "../../data/time_series_covid19_confirmed_US.csv"
+landscape = "../../data/nasa_pop.asc"
+start_date = "2/21/20"
+end_date = "6/30/20"
+min_lat = 24.0
+max_lat = 50.0
+min_lon = -125.0
+max_lon = -66.0
+headless_bin = "../../headless_runner"
+results_dir = "../../results/us_sweep"
+jobs = 1
+export_fields = true
+
+[baseline]
+resolution = 100
+mobility_rate = 0.0
+base_survival_rate = 1.2
+urban_multiplier = 0.25
+ticks_per_day = 1
+days_per_tick = 1
+nodal_retention = false
+unitary_coin = "HADAMARD_TENSOR"
+init_state = "UNIFORM"
+boundary = "ABSORBING"
+
+[pilot]
+enabled = true
+n_samples = 128
+seed = 42
+
+[sinkhorn]
+reg = 0.1
+num_iter_max = 2000
+stop_threshold = 1.0e-6
+eval_resolution = 50
+
+[ofat]
+mobility_rate = { start = 0.0, stop = 0.50, step = 0.05 }
+base_survival_rate = { start = 0.80, stop = 1.20, step = 0.05 }
+urban_multiplier = { start = 0.0, stop = 0.50, step = 0.05 }
+ticks_per_day = { values = [1, 2, 3, 4, 5, 6, 7, 8] }
+days_per_tick = { values = [1, 2, 3, 4] }
+unitary_coin = { values = ["GROVER", "DFT", "HADAMARD_TENSOR", "ALTERNATING_DFT"] }
+init_state = { values = ["PURE_NORTH", "UNIFORM", "ALTERNATING_PHASE", "CHIRAL_WEST", "HADAMARD_SYMMETRIC"] }
+boundary = { values = ["ABSORBING", "REFLECTIVE"] }
+nodal_retention = { values = [true, false] }
+
+[resolution_study]
+enabled = true
+values = [50, 75, 100, 150, 200]

@@ -1,20 +1,36 @@
 #include "Simulator2D.h"
-#include <cmath>
+
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <functional>
 #include <iostream>
-#include "DataParser.h"
+#include <sstream>
+
+std::mutex Simulator2D::landscape_cache_mutex_;
+std::unordered_map<std::string, Simulator2D::LandscapeCacheEntry> Simulator2D::landscape_cache_;
+
+std::string Simulator2D::make_landscape_cache_key(const std::string& filepath, const SimConfig& cfg) {
+    std::ostringstream oss;
+    oss << filepath << "|" << cfg.resolution << "|"
+        << cfg.min_lat << "|" << cfg.max_lat << "|"
+        << cfg.min_lon << "|" << cfg.max_lon << "|"
+        << cfg.base_survival_rate << "|" << cfg.urban_multiplier;
+    return oss.str();
+}
 
 Simulator2D::Simulator2D(SimConfig master_settings) {
+    master_settings.validate();
     config = master_settings;
     int N = config.resolution;
     int total_nodes = N * N;
-    
+
     amp_N.resize(total_nodes, {0.0f, 0.0f});
     amp_S.resize(total_nodes, {0.0f, 0.0f});
     amp_E.resize(total_nodes, {0.0f, 0.0f});
     amp_W.resize(total_nodes, {0.0f, 0.0f});
     amp_C.resize(total_nodes, {0.0f, 0.0f});
-    
+
     next_amp_N.resize(total_nodes, {0.0f, 0.0f});
     next_amp_S.resize(total_nodes, {0.0f, 0.0f});
     next_amp_E.resize(total_nodes, {0.0f, 0.0f});
@@ -23,10 +39,12 @@ Simulator2D::Simulator2D(SimConfig master_settings) {
 
     prev_probs.resize(total_nodes, 0.0f);
     node_growth_rate.resize(total_nodes, 1.0f);
+    node_capacity.resize(total_nodes, 0.0f);
+    land_mask.resize(total_nodes, 1.0f);
+    historical_probs.resize(total_nodes, 0.0f);
 
     applyInitialState();
-
-    load_ascii_mask("/Users/willott/School/REU/Simulator/1D/data/nasa_pop.asc");
+    load_ascii_mask(config.landscape_path);
 }
 
 void Simulator2D::applyInitialState() {
@@ -35,25 +53,33 @@ void Simulator2D::applyInitialState() {
     int center_y = N / 2;
     int center_idx = (center_y * N) + center_x;
 
-    switch(config.init_state_2d) {
+    switch (config.init_state_2d) {
         case InitialState2D::PURE_NORTH:
             amp_N[center_idx] = {1.0f, 0.0f};
             break;
         case InitialState2D::UNIFORM:
-            amp_N[center_idx] = {0.5f, 0.0f}; amp_S[center_idx] = {0.5f, 0.0f};
-            amp_E[center_idx] = {0.5f, 0.0f}; amp_W[center_idx] = {0.5f, 0.0f};
+            amp_N[center_idx] = {0.5f, 0.0f};
+            amp_S[center_idx] = {0.5f, 0.0f};
+            amp_E[center_idx] = {0.5f, 0.0f};
+            amp_W[center_idx] = {0.5f, 0.0f};
             break;
         case InitialState2D::ALTERNATING_PHASE:
-            amp_N[center_idx] = {0.5f, 0.0f}; amp_S[center_idx] = {-0.5f, 0.0f};
-            amp_E[center_idx] = {0.5f, 0.0f}; amp_W[center_idx] = {-0.5f, 0.0f};
+            amp_N[center_idx] = {0.5f, 0.0f};
+            amp_S[center_idx] = {-0.5f, 0.0f};
+            amp_E[center_idx] = {0.5f, 0.0f};
+            amp_W[center_idx] = {-0.5f, 0.0f};
             break;
         case InitialState2D::CHIRAL_WEST:
-            amp_N[center_idx] = { 0.5f, 0.0f}; amp_S[center_idx] = { 0.0f, 0.5f};
-            amp_E[center_idx] = {-0.5f, 0.0f}; amp_W[center_idx] = { 0.0f,-0.5f};
+            amp_N[center_idx] = {0.5f, 0.0f};
+            amp_S[center_idx] = {0.0f, 0.5f};
+            amp_E[center_idx] = {-0.5f, 0.0f};
+            amp_W[center_idx] = {0.0f, -0.5f};
             break;
-        case InitialState2D::HADAMARD_SYMMETRIC: 
-            amp_N[center_idx] = { 0.5f,  0.0f}; amp_S[center_idx] = { 0.0f,  0.5f};
-            amp_E[center_idx] = { 0.0f,  0.5f}; amp_W[center_idx] = {-0.5f,  0.0f};
+        case InitialState2D::HADAMARD_SYMMETRIC:
+            amp_N[center_idx] = {0.5f, 0.0f};
+            amp_S[center_idx] = {0.0f, 0.5f};
+            amp_E[center_idx] = {0.0f, 0.5f};
+            amp_W[center_idx] = {-0.5f, 0.0f};
             break;
     }
 }
@@ -63,14 +89,13 @@ void Simulator2D::update() {
     int N = config.resolution;
     int total_nodes = N * N;
 
-    // Save current probabilities BEFORE modifying arrays
     for (int i = 0; i < total_nodes; i++) {
-        prev_probs[i] = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) + std::norm(amp_W[i]) + std::norm(amp_C[i]);
+        prev_probs[i] = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) +
+                        std::norm(amp_W[i]) + std::norm(amp_C[i]);
     }
 
-    // --- PHASE 1: LOCAL MIXING ---
     if (config.mode == SimMode::QUANTUM) {
-        const std::complex<float> I(0.0f, 1.0f); 
+        const std::complex<float> I(0.0f, 1.0f);
 
         for (int i = 0; i < total_nodes; i++) {
             std::complex<float> n = amp_N[i];
@@ -81,25 +106,23 @@ void Simulator2D::update() {
 
             std::complex<float> n_mix, s_mix, e_mix, w_mix;
 
-            // 1. ALWAYS run the Unitary Coin Mixing first
             if (config.unitary_coin == UnitaryCoin2D::GROVER) {
                 std::complex<float> half_sum = (n + s + e + w) * 0.5f;
-                n_mix = half_sum - n; s_mix = half_sum - s;
-                e_mix = half_sum - e; w_mix = half_sum - w;
-            } 
-            else if (config.unitary_coin == UnitaryCoin2D::DFT) {
+                n_mix = half_sum - n;
+                s_mix = half_sum - s;
+                e_mix = half_sum - e;
+                w_mix = half_sum - w;
+            } else if (config.unitary_coin == UnitaryCoin2D::DFT) {
                 n_mix = 0.5f * (n + s + e + w);
                 s_mix = 0.5f * (n + I * s - e - I * w);
                 e_mix = 0.5f * (n - s + e - w);
                 w_mix = 0.5f * (n - I * s - e + I * w);
-            }
-            else if (config.unitary_coin == UnitaryCoin2D::HADAMARD_TENSOR) {
+            } else if (config.unitary_coin == UnitaryCoin2D::HADAMARD_TENSOR) {
                 n_mix = 0.5f * (n + s + e + w);
                 s_mix = 0.5f * (n - s + e - w);
                 e_mix = 0.5f * (n + s - e - w);
                 w_mix = 0.5f * (n - s - e + w);
-            }
-            else if (config.unitary_coin == UnitaryCoin2D::ALTERNATING_DFT) {
+            } else if (config.unitary_coin == UnitaryCoin2D::ALTERNATING_DFT) {
                 bool is_even_step = (current_step % 2 == 0);
                 if (is_even_step) {
                     n_mix = 0.5f * (n + s + e + w);
@@ -114,101 +137,94 @@ void Simulator2D::update() {
                 }
             }
 
-            // 2. ONLY apply the biological scalar AFTER mixing
             if (config.system_type_2d == SystemType::OPEN) {
                 float local_R0 = node_growth_rate[i];
-                
-                // --- NEW: LOGISTIC DAMPENER (CARRYING CAPACITY) ---
-                // Calculate current probability mass at this node
                 float current_p = std::norm(n) + std::norm(s) + std::norm(e) + std::norm(w) + std::norm(c);
-                
-                // Scale normalized probability back to real-world simulated humans
-                float simulated_humans = current_p * max_seed_cases; 
+                float simulated_humans = current_p * max_seed_cases;
                 float capacity = node_capacity[i];
 
                 float effective_R0 = local_R0;
                 if (capacity > 0.0f) {
                     float saturation = simulated_humans / capacity;
-                    // As saturation approaches 1.0, growth decays
                     effective_R0 = local_R0 * std::max(0.0f, 1.0f - saturation);
                 } else {
-                    effective_R0 = 0.0f; // Dead zones cannot grow
+                    effective_R0 = 0.0f;
                 }
-                
+
                 if (config.nodal_retention) {
                     float m_amp = std::sqrt(config.mobility_rate);
                     float stay_amp = std::sqrt(1.0f - config.mobility_rate);
-                    float split_amp = m_amp * 0.5f; 
-                    
-                    // --- CRITICAL: Use effective_R0 instead of local_R0 ---
+                    float split_amp = m_amp * 0.5f;
+
                     std::complex<float> g_c = c * effective_R0;
                     std::complex<float> g_n = n_mix * effective_R0;
                     std::complex<float> g_s = s_mix * effective_R0;
                     std::complex<float> g_e = e_mix * effective_R0;
                     std::complex<float> g_w = w_mix * effective_R0;
-                    
+
                     std::complex<float> unmixed_sum = (n + s + e + w) * effective_R0;
                     amp_C[i] = (g_c * stay_amp) + (unmixed_sum * 0.5f * stay_amp);
-                    
-                    // --- NEW FIX: The City Leak matches your UI selection! ---
+
                     std::complex<float> leak_N = {0.0f, 0.0f};
                     std::complex<float> leak_S = {0.0f, 0.0f};
                     std::complex<float> leak_E = {0.0f, 0.0f};
                     std::complex<float> leak_W = {0.0f, 0.0f};
 
-                    switch(config.init_state_2d) {
+                    switch (config.init_state_2d) {
                         case InitialState2D::PURE_NORTH:
-                            leak_N = g_c * m_amp; // All leak goes North
+                            leak_N = g_c * m_amp;
                             break;
                         case InitialState2D::UNIFORM:
-                            leak_N = g_c * split_amp; leak_S = g_c * split_amp;
-                            leak_E = g_c * split_amp; leak_W = g_c * split_amp;
+                            leak_N = g_c * split_amp;
+                            leak_S = g_c * split_amp;
+                            leak_E = g_c * split_amp;
+                            leak_W = g_c * split_amp;
                             break;
                         case InitialState2D::ALTERNATING_PHASE:
-                            leak_N = g_c * split_amp; leak_S = -g_c * split_amp;
-                            leak_E = g_c * split_amp; leak_W = -g_c * split_amp;
+                            leak_N = g_c * split_amp;
+                            leak_S = -g_c * split_amp;
+                            leak_E = g_c * split_amp;
+                            leak_W = -g_c * split_amp;
                             break;
                         case InitialState2D::CHIRAL_WEST:
-                            leak_N = g_c * split_amp;       leak_S = g_c * split_amp * I;
-                            leak_E = -g_c * split_amp;      leak_W = -g_c * split_amp * I;
+                            leak_N = g_c * split_amp;
+                            leak_S = g_c * split_amp * I;
+                            leak_E = -g_c * split_amp;
+                            leak_W = -g_c * split_amp * I;
                             break;
                         case InitialState2D::HADAMARD_SYMMETRIC:
-                            leak_N = g_c * split_amp;       leak_S = g_c * split_amp * I;
-                            leak_E = g_c * split_amp * I;   leak_W = -g_c * split_amp;
+                            leak_N = g_c * split_amp;
+                            leak_S = g_c * split_amp * I;
+                            leak_E = g_c * split_amp * I;
+                            leak_W = -g_c * split_amp;
                             break;
                     }
 
-                    // Send out the travelers, leak the correctly shaped residents
                     amp_N[i] = (g_n * m_amp) + leak_N;
                     amp_S[i] = (g_s * m_amp) + leak_S;
                     amp_E[i] = (g_e * m_amp) + leak_E;
                     amp_W[i] = (g_w * m_amp) + leak_W;
                 } else {
-                    // --- CRITICAL: Use effective_R0 here too! ---
                     amp_N[i] = n_mix * effective_R0;
                     amp_S[i] = s_mix * effective_R0;
                     amp_E[i] = e_mix * effective_R0;
                     amp_W[i] = w_mix * effective_R0;
-                    amp_C[i] = {0.0f, 0.0f}; // Clear center if toggle is off
+                    amp_C[i] = {0.0f, 0.0f};
                 }
             } else {
-                // FIXED: Sandbox mode passes the waves cleanly
                 amp_N[i] = n_mix;
                 amp_S[i] = s_mix;
                 amp_E[i] = e_mix;
                 amp_W[i] = w_mix;
             }
         }
-    }
-
-    else if (config.mode == SimMode::CLASSICAL) {
+    } else if (config.mode == SimMode::CLASSICAL) {
         for (int i = 0; i < total_nodes; i++) {
-            // 1. Sum total probability at this node (including the resident pool)
-            float current_p = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) + std::norm(amp_W[i]) + std::norm(amp_C[i]);
-            
+            float current_p = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) +
+                              std::norm(amp_W[i]) + std::norm(amp_C[i]);
+
             float effective_R0 = 1.0f;
 
-            // 2. Apply Logistic Dampener if in OPEN system
             if (config.system_type_2d == SystemType::OPEN) {
                 float local_R0 = node_growth_rate[i];
                 float simulated_humans = current_p * max_seed_cases;
@@ -218,37 +234,33 @@ void Simulator2D::update() {
                     float saturation = simulated_humans / capacity;
                     effective_R0 = local_R0 * std::max(0.0f, 1.0f - saturation);
                 } else {
-                    effective_R0 = 0.0f; // Dead zones
+                    effective_R0 = 0.0f;
                 }
             }
 
-            // Apply growth/decay scalar
             float next_total_p = current_p * effective_R0;
 
-            // 3. Handle Nodal Retention vs Full Diffusion
             if (config.nodal_retention) {
                 float stay_p = next_total_p * (1.0f - config.mobility_rate);
                 float move_p = next_total_p * config.mobility_rate;
-                float dir_p = move_p * 0.25f; // Split moving population 4 ways
+                float dir_p = move_p * 0.25f;
 
-                amp_C[i] = { std::sqrt(stay_p), 0.0f };
-                amp_N[i] = { std::sqrt(dir_p), 0.0f };
-                amp_S[i] = { std::sqrt(dir_p), 0.0f };
-                amp_E[i] = { std::sqrt(dir_p), 0.0f };
-                amp_W[i] = { std::sqrt(dir_p), 0.0f };
+                amp_C[i] = {std::sqrt(stay_p), 0.0f};
+                amp_N[i] = {std::sqrt(dir_p), 0.0f};
+                amp_S[i] = {std::sqrt(dir_p), 0.0f};
+                amp_E[i] = {std::sqrt(dir_p), 0.0f};
+                amp_W[i] = {std::sqrt(dir_p), 0.0f};
             } else {
-                float dir_p = next_total_p * 0.25f; // Split all population 4 ways
-
-                amp_C[i] = { 0.0f, 0.0f };
-                amp_N[i] = { std::sqrt(dir_p), 0.0f };
-                amp_S[i] = { std::sqrt(dir_p), 0.0f };
-                amp_E[i] = { std::sqrt(dir_p), 0.0f };
-                amp_W[i] = { std::sqrt(dir_p), 0.0f };
+                float dir_p = next_total_p * 0.25f;
+                amp_C[i] = {0.0f, 0.0f};
+                amp_N[i] = {std::sqrt(dir_p), 0.0f};
+                amp_S[i] = {std::sqrt(dir_p), 0.0f};
+                amp_E[i] = {std::sqrt(dir_p), 0.0f};
+                amp_W[i] = {std::sqrt(dir_p), 0.0f};
             }
         }
     }
 
-    // --- PHASE 2: THE 2D SHIFT OPERATOR (Shared by Quantum & Classical) ---
     std::fill(next_amp_N.begin(), next_amp_N.end(), std::complex<float>(0.0f, 0.0f));
     std::fill(next_amp_S.begin(), next_amp_S.end(), std::complex<float>(0.0f, 0.0f));
     std::fill(next_amp_E.begin(), next_amp_E.end(), std::complex<float>(0.0f, 0.0f));
@@ -258,24 +270,22 @@ void Simulator2D::update() {
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
             int current_idx = y * N + x;
-
-            next_amp_C[current_idx] = amp_C[current_idx]; // <--- Resident wave stays
+            next_amp_C[current_idx] = amp_C[current_idx];
 
             if (config.boundary_condition == BoundaryType::ABSORBING) {
-                if (y > 0)     next_amp_N[(y - 1) * N + x] = amp_N[current_idx];
+                if (y > 0) next_amp_N[(y - 1) * N + x] = amp_N[current_idx];
                 if (y < N - 1) next_amp_S[(y + 1) * N + x] = amp_S[current_idx];
                 if (x < N - 1) next_amp_E[y * N + (x + 1)] = amp_E[current_idx];
-                if (x > 0)     next_amp_W[y * N + (x - 1)] = amp_W[current_idx];
-            } 
-            else {
-                if (y > 0) next_amp_N[(y - 1) * N + x] += amp_N[current_idx]; 
-                else       next_amp_S[current_idx]     += amp_N[current_idx]; 
+                if (x > 0) next_amp_W[y * N + (x - 1)] = amp_W[current_idx];
+            } else {
+                if (y > 0) next_amp_N[(y - 1) * N + x] += amp_N[current_idx];
+                else next_amp_S[current_idx] += amp_N[current_idx];
                 if (y < N - 1) next_amp_S[(y + 1) * N + x] += amp_S[current_idx];
-                else           next_amp_N[current_idx]     += amp_S[current_idx]; 
+                else next_amp_N[current_idx] += amp_S[current_idx];
                 if (x < N - 1) next_amp_E[y * N + (x + 1)] += amp_E[current_idx];
-                else           next_amp_W[current_idx]     += amp_E[current_idx]; 
+                else next_amp_W[current_idx] += amp_E[current_idx];
                 if (x > 0) next_amp_W[y * N + (x - 1)] += amp_W[current_idx];
-                else       next_amp_E[current_idx]     += amp_W[current_idx]; 
+                else next_amp_E[current_idx] += amp_W[current_idx];
             }
         }
     }
@@ -286,7 +296,6 @@ void Simulator2D::update() {
     amp_W = next_amp_W;
     amp_C = next_amp_C;
 
-    // --- NEW: APPLY GEOGRAPHIC ABSORBING MASK ---
     if (config.system_type_2d == SystemType::OPEN) {
         for (int i = 0; i < N * N; i++) {
             amp_N[i] *= land_mask[i];
@@ -297,304 +306,155 @@ void Simulator2D::update() {
         }
     }
 
-   // --- PHASE 3: UPDATE HISTORICAL OVERLAY ---
     if (show_historical_overlay || track_masked_mse || track_emd) {
-        std::fill(historical_probs.begin(), historical_probs.end(), 0.0f);
+        // days_per_tick > 1 slows the calendar relative to physics (more real days per tick).
+        int day_idx = (current_step * config.days_per_tick) / config.quantum_ticks_per_real_tick;
+        rebuild_historical_probs_for_day(day_idx);
 
-        for (const auto& point : historical_dataset) {
-            if (point.lat < config.min_lat || point.lat > config.max_lat || point.lon < config.min_lon || point.lon > config.max_lon) continue;
-
-            float pct_x = (point.lon - config.min_lon) / (config.max_lon - config.min_lon);
-            float pct_y = (config.max_lat - point.lat) / (config.max_lat - config.min_lat);
-
-            int grid_x = static_cast<int>(pct_x * (N - 1));
-            int grid_y = static_cast<int>(pct_y * (N - 1));
-
-            if (grid_x >= 0 && grid_x < N && grid_y >= 0 && grid_y < N) {
-                int day_idx = current_step / config.quantum_ticks_per_real_tick;
-                if (day_idx >= point.cases_history.size()) day_idx = point.cases_history.size() - 1;
-
-                float hist_weight = static_cast<float>(point.cases_history[day_idx]) / static_cast<float>(max_historical_cases);
-                
-                int idx = grid_y * N + grid_x;
-                float current_val = historical_probs[idx] + hist_weight;
-                historical_probs[idx] = std::min(current_val, 1.0f); 
-            }
-        }
-    }
-
-    // --- PHASE 4: CALCULATE ADVANCED TELEMETRY ---
-    if (show_historical_overlay || track_masked_mse || track_emd) {
-        
-        // 1. Masked MSE
         if (track_masked_mse) {
-            float mse_sum = 0.0f;
-            int mask_count = 0;
-            for (int i = 0; i < total_nodes; i++) {
-                if (historical_probs[i] > 0.0f) { // Only check nodes with historical data
-                    float sim_p = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) + std::norm(amp_W[i]) + std::norm(amp_C[i]);
-                    
-                    // --- FIX: Scale up to REAL case numbers ---
-                    float sim_cases = sim_p * max_seed_cases;
-                    float real_cases = historical_probs[i] * max_historical_cases;
-                    
-                    float diff = sim_cases - real_cases;
-                    mse_sum += (diff * diff);
-                    mask_count++;
-                }
-            }
-            if (mask_count > 0) masked_mse_history.push_back(mse_sum / mask_count);
-            else masked_mse_history.push_back(0.0f);
+            masked_mse_history.push_back(compute_legacy_masked_mse());
         }
-
-        // 2. Marginal Sliced Earth Mover's Distance (O(N) Approximation)
         if (track_emd) {
-            std::vector<float> sim_x(N, 0.0f), sim_y(N, 0.0f);
-            std::vector<float> hist_x(N, 0.0f), hist_y(N, 0.0f);
-            float total_sim = 0.0f, total_hist = 0.0f;
-
-            for (int y = 0; y < N; y++) {
-                for (int x = 0; x < N; x++) {
-                    int idx = y * N + x;
-                    float sim_val = (std::norm(amp_N[idx]) + std::norm(amp_S[idx]) + std::norm(amp_E[idx]) + std::norm(amp_W[idx]) + std::norm(amp_C[idx])) * max_seed_cases / max_historical_cases;
-                    float hist_val = historical_probs[idx];
-                    
-                    sim_x[x] += sim_val; sim_y[y] += sim_val;
-                    hist_x[x] += hist_val; hist_y[y] += hist_val;
-                    total_sim += sim_val; total_hist += hist_val;
-                }
-            }
-
-            float emd_total = 0.0f;
-            float cdf_sim_x = 0.0f, cdf_hist_x = 0.0f;
-            float cdf_sim_y = 0.0f, cdf_hist_y = 0.0f;
-            
-            for (int i = 0; i < N; i++) {
-                cdf_sim_x += sim_x[i] / (total_sim > 0 ? total_sim : 1.0f);
-                cdf_hist_x += hist_x[i] / (total_hist > 0 ? total_hist : 1.0f);
-                emd_total += std::abs(cdf_sim_x - cdf_hist_x);
-
-                cdf_sim_y += sim_y[i] / (total_sim > 0 ? total_sim : 1.0f);
-                cdf_hist_y += hist_y[i] / (total_hist > 0 ? total_hist : 1.0f);
-                emd_total += std::abs(cdf_sim_y - cdf_hist_y);
-            }
-            emd_history.push_back(emd_total);
+            emd_history.push_back(compute_legacy_marginal_emd());
         }
     }
 }
 
-void Simulator2D::draw(int screen_width, int screen_height, bool show_info, bool is_paused, Vector2 mouse_pos, bool is_mouse_down) {
+void Simulator2D::get_probabilities(std::vector<float>& out) const {
+    int total = config.resolution * config.resolution;
+    out.resize(total);
+    for (int i = 0; i < total; i++) {
+        out[i] = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) +
+                 std::norm(amp_W[i]) + std::norm(amp_C[i]);
+    }
+}
+
+void Simulator2D::get_historical_probs(std::vector<float>& out) const {
+    out = historical_probs;
+}
+
+void Simulator2D::rebuild_historical_probs_for_day(int day_idx) {
     int N = config.resolution;
-    float grid_pixel_size = std::min(screen_width, screen_height) - 80.0f;
-    float cell_size = grid_pixel_size / N;
-    float offset_x = (screen_width - grid_pixel_size) / 2.0f;
-    float offset_y = (screen_height - grid_pixel_size) / 2.0f;
+    std::fill(historical_probs.begin(), historical_probs.end(), 0.0f);
 
-    std::vector<float> display_probs(N * N, 0.0f);
-    float max_p = 0.0001f;
+    for (const auto& point : historical_dataset) {
+        if (point.lat < config.min_lat || point.lat > config.max_lat ||
+            point.lon < config.min_lon || point.lon > config.max_lon) {
+            continue;
+        }
 
-    float expected_x = 0.0f, expected_x2 = 0.0f;
-    float expected_y = 0.0f, expected_y2 = 0.0f;
-    float sum_p = 0.0f;
-    int center = N / 2;
+        float pct_x = (point.lon - config.min_lon) / (config.max_lon - config.min_lon);
+        float pct_y = (config.max_lat - point.lat) / (config.max_lat - config.min_lat);
 
-    for (int i = 0; i < N * N; i++) {
-        float current_p = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) + std::norm(amp_W[i]) + std::norm(amp_C[i]);
-        display_probs[i] = (current_p + prev_probs[i]) * 0.5f;
+        int grid_x = static_cast<int>(pct_x * (N - 1));
+        int grid_y = static_cast<int>(pct_y * (N - 1));
 
-        if (display_probs[i] > max_p) max_p = display_probs[i];
+        if (grid_x >= 0 && grid_x < N && grid_y >= 0 && grid_y < N) {
+            int use_day = day_idx;
+            if (use_day < 0) use_day = 0;
+            if (use_day >= static_cast<int>(point.cases_history.size())) {
+                use_day = static_cast<int>(point.cases_history.size()) - 1;
+            }
+            if (use_day < 0) continue;
 
-        int grid_y = i / N;
-        int grid_x = i % N;
-        float cx = (float)(grid_x - center);
-        float cy = (float)(grid_y - center);
-
-        sum_p += current_p;
-        expected_x += cx * current_p;
-        expected_x2 += cx * cx * current_p;
-        expected_y += cy * current_p;
-        expected_y2 += cy * cy * current_p;
+            float hist_weight = static_cast<float>(point.cases_history[use_day]) /
+                                static_cast<float>(max_historical_cases);
+            int idx = grid_y * N + grid_x;
+            historical_probs[idx] = std::min(historical_probs[idx] + hist_weight, 1.0f);
+        }
     }
+}
 
-    if (sum_p > 0.0f) {
-        expected_x /= sum_p; expected_x2 /= sum_p;
-        expected_y /= sum_p; expected_y2 /= sum_p;
+float Simulator2D::compute_legacy_masked_mse() const {
+    int total_nodes = config.resolution * config.resolution;
+    float mse_sum = 0.0f;
+    int mask_count = 0;
+
+    for (int i = 0; i < total_nodes; i++) {
+        if (historical_probs[i] > 0.0f) {
+            float sim_p = std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) +
+                          std::norm(amp_W[i]) + std::norm(amp_C[i]);
+            float sim_cases = sim_p * max_seed_cases;
+            float real_cases = historical_probs[i] * max_historical_cases;
+            float diff = sim_cases - real_cases;
+            mse_sum += (diff * diff);
+            mask_count++;
+        }
     }
-    
-    if (!is_paused) {
-        float var_x = expected_x2 - (expected_x * expected_x);
-        float var_y = expected_y2 - (expected_y * expected_y);
-        float sigma_x = (var_x > 0.0f) ? std::sqrt(var_x) : 0.0f;
-        float sigma_y = (var_y > 0.0f) ? std::sqrt(var_y) : 0.0f;
-        
-        std_dev_x_hist.push_back(sigma_x);
-        std_dev_y_hist.push_back(sigma_y);
-        std_dev_total_hist.push_back(std::sqrt(var_x + var_y));
-    }
+    return mask_count > 0 ? mse_sum / mask_count : 0.0f;
+}
 
-    int tick_spacing = N / 10; 
-    if (tick_spacing == 0) tick_spacing = 1;
-    Color tickColor = { 150, 150, 150, 255 };
-
-    for (int i = 0; i <= N; i += tick_spacing) {
-        float pos = i * cell_size;
-        int coord_val = i - center; 
-        
-        const char* label = TextFormat("%d", coord_val);
-        int text_width = MeasureText(label, 10);
-        
-        DrawLineEx({ offset_x + pos, offset_y + grid_pixel_size }, { offset_x + pos, offset_y + grid_pixel_size + 8 }, 1.0f, tickColor);
-        DrawText(label, (int)(offset_x + pos) - (text_width / 2), (int)(offset_y + grid_pixel_size + 12), 10, tickColor);
-
-        DrawLineEx({ offset_x, offset_y + pos }, { offset_x - 8, offset_y + pos }, 1.0f, tickColor);
-        DrawText(label, (int)(offset_x - 12) - text_width, (int)(offset_y + pos) - 5, 10, tickColor);
-    }
-
-    DrawRectangle((int)offset_x, (int)offset_y, (int)grid_pixel_size, (int)grid_pixel_size, { 5, 5, 10, 255 });
+float Simulator2D::compute_legacy_marginal_emd() const {
+    int N = config.resolution;
+    std::vector<float> sim_x(N, 0.0f), sim_y(N, 0.0f);
+    std::vector<float> hist_x(N, 0.0f), hist_y(N, 0.0f);
+    float total_sim = 0.0f, total_hist = 0.0f;
 
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
             int idx = y * N + x;
-            if (display_probs[idx] == 0.0f) continue; 
+            float sim_val = (std::norm(amp_N[idx]) + std::norm(amp_S[idx]) + std::norm(amp_E[idx]) +
+                             std::norm(amp_W[idx]) + std::norm(amp_C[idx])) *
+                            max_seed_cases / max_historical_cases;
+            float hist_val = historical_probs[idx];
 
-            float base_ratio = display_probs[idx] / max_p;
-            float intensity = std::pow(base_ratio, 0.3f); 
-            
-            unsigned char color_val = (unsigned char)(intensity * 255);
-            Color cellColor = { 0, (unsigned char)(color_val * 0.8f), color_val, 255 };
-
-            DrawRectangle(
-                (int)(offset_x + x * cell_size), 
-                (int)(offset_y + y * cell_size), 
-                (int)std::ceil(cell_size), 
-                (int)std::ceil(cell_size), 
-                cellColor
-            );
-
-            // Red Historical Overlay Layer
-            if (show_historical_overlay && historical_probs[idx] > 0.0f) {
-                unsigned char alpha_val = (unsigned char)(std::pow(historical_probs[idx], 0.3f) * 200);
-                Color overlayColor = { 255, 50, 0, alpha_val }; 
-                
-                DrawRectangle(
-                    (int)(offset_x + x * cell_size), 
-                    (int)(offset_y + y * cell_size), 
-                    (int)std::ceil(cell_size), 
-                    (int)std::ceil(cell_size), 
-                    overlayColor
-                );
-            }
+            sim_x[x] += sim_val;
+            sim_y[y] += sim_val;
+            hist_x[x] += hist_val;
+            hist_y[y] += hist_val;
+            total_sim += sim_val;
+            total_hist += hist_val;
         }
     }
 
-    if (config.boundary_condition == BoundaryType::REFLECTIVE) {
-        DrawRectangleLinesEx({ offset_x - 4.0f, offset_y - 4.0f, grid_pixel_size + 8.0f, grid_pixel_size + 8.0f }, 4.0f, { 100, 200, 255, 200 }); 
-    } else {
-        DrawRectangleLinesEx({ offset_x - 1.0f, offset_y - 1.0f, grid_pixel_size + 2.0f, grid_pixel_size + 2.0f }, 1.0f, { 180, 50, 50, 150 });
+    float emd_total = 0.0f;
+    float cdf_sim_x = 0.0f, cdf_hist_x = 0.0f;
+    float cdf_sim_y = 0.0f, cdf_hist_y = 0.0f;
+
+    for (int i = 0; i < N; i++) {
+        cdf_sim_x += sim_x[i] / (total_sim > 0 ? total_sim : 1.0f);
+        cdf_hist_x += hist_x[i] / (total_hist > 0 ? total_hist : 1.0f);
+        emd_total += std::abs(cdf_sim_x - cdf_hist_x);
+
+        cdf_sim_y += sim_y[i] / (total_sim > 0 ? total_sim : 1.0f);
+        cdf_hist_y += hist_y[i] / (total_hist > 0 ? total_hist : 1.0f);
+        emd_total += std::abs(cdf_sim_y - cdf_hist_y);
     }
+    return emd_total;
+}
 
-    if (show_info) {
-        DrawRectangle(50, 50, 500, 300, { 20, 25, 30, 240 });
-        DrawRectangleLines(50, 50, 500, 300, { 100, 150, 200, 255 });
-        DrawText("2D DIAGNOSTICS [WIP]", 70, 70, 20, YELLOW);
-        
-        const char* modeStr = (config.mode == SimMode::QUANTUM) ? "QUANTUM ENGINE ACTIVE" : "CLASSICAL ENGINE ACTIVE";
-        DrawText(modeStr, 70, 110, 15, WHITE);
-        
-        const char* boundStr = (config.boundary_condition == BoundaryType::REFLECTIVE) ? "Reflective Walls (Trapped)" : "Absorbing Walls (Void)";
-        DrawText(TextFormat("Boundary System: %s", boundStr), 70, 140, 15, LIGHTGRAY);
-    }
-
-    // DRAW TELEMETRY OVERLAYS
-    int overlay_width = 300;
-    int overlay_height = 120;
-    int overlay_x = screen_width - overlay_width - 20; 
-    int current_y = 20; 
-
-    auto draw_graph = [&](const char* title, const std::vector<float>& history, Color col) {
-        if (history.empty()) return;
-        DrawRectangle(overlay_x, current_y, overlay_width, overlay_height, { 30, 30, 30, 220 });
-        DrawRectangleLines(overlay_x, current_y, overlay_width, overlay_height, col);
-        DrawText(title, overlay_x + 10, current_y + 10, 10, { 200, 200, 200, 255 });
-        
-        float current_val = history.back();
-        const char* val_text = TextFormat("%.6f", current_val);
-        DrawText(val_text, overlay_x + overlay_width - MeasureText(val_text, 10) - 10, current_y + 10, 10, col);
-
-        if (history.size() > 1) {
-            float max_val = 0.0001f;
-            for (float v : history) if (v > max_val) max_val = v;
-
-            float graph_y_start = current_y + overlay_height;
-            float graph_h = overlay_height - 30; 
-            float x_step = (float)overlay_width / history.size();
-
-            for (size_t i = 1; i < history.size(); i++) {
-                Vector2 p1 = { overlay_x + (i - 1) * x_step, graph_y_start - (history[i - 1] / max_val * graph_h) };
-                Vector2 p2 = { overlay_x + i * x_step, graph_y_start - (history[i] / max_val * graph_h) };
-                DrawLineEx(p1, p2, 2.0f, col); 
-            }
+bool Simulator2D::state_is_finite() const {
+    int total = config.resolution * config.resolution;
+    for (int i = 0; i < total; i++) {
+        auto check = [](const std::complex<float>& z) {
+            return std::isfinite(z.real()) && std::isfinite(z.imag());
+        };
+        if (!check(amp_N[i]) || !check(amp_S[i]) || !check(amp_E[i]) ||
+            !check(amp_W[i]) || !check(amp_C[i])) {
+            return false;
         }
-        current_y += overlay_height + 10; // Shift down for the next graph
-    };
-
-    if (track_masked_mse) draw_graph("Masked MSE (Hotspots Only)", masked_mse_history, { 255, 100, 100, 255 });
-    if (track_emd) draw_graph("Earth Mover's Distance (Marginal Proxy)", emd_history, { 100, 255, 100, 255 });
-
-    // DRAW THE METRICS MENU
-    if (show_metrics_menu) {
-        int menu_w = 450;
-        int menu_h = 240; // Increased height to fit 3 options
-        int menu_x = (screen_width - menu_w) / 2;
-        int menu_y = (screen_height - menu_h) / 2;
-
-        DrawRectangle(0, 0, screen_width, screen_height, { 10, 10, 10, 150 }); // Darken background
-        DrawRectangle(menu_x, menu_y, menu_w, menu_h, { 25, 30, 40, 255 });
-        DrawRectangleLines(menu_x, menu_y, menu_w, menu_h, { 100, 150, 200, 255 });
-
-        DrawText("TELEMETRY TRACKERS", menu_x + menu_w/2 - MeasureText("TELEMETRY TRACKERS", 20)/2, menu_y + 20, 20, WHITE);
-        
-        Color col1 = track_masked_mse ? Color{ 0, 200, 255, 255 } : GRAY;
-        DrawText("[1] Masked MSE", menu_x + 80, menu_y + 70, 20, col1);
-
-        Color col2 = track_emd ? Color{ 0, 200, 255, 255 } : GRAY;
-        DrawText("[2] Earth Mover's Distance", menu_x + 80, menu_y + 110, 20, col2);
-
-        Color col3 = show_historical_overlay ? Color{ 0, 200, 255, 255 } : GRAY;
-        DrawText("[3] Historical Overlay (Red Map)", menu_x + 80, menu_y + 150, 20, col3);
-
-        DrawText("Press Z to close and resume", menu_x + menu_w/2 - MeasureText("Press Z to close and resume", 15)/2, menu_y + 200, 15, LIGHTGRAY);
     }
-    // DRAW THE ENGINE MODE MENU
-    if (show_mode_menu) {
-        int menu_w = 450;
-        int menu_h = 200; 
-        int menu_x = (screen_width - menu_w) / 2;
-        int menu_y = (screen_height - menu_h) / 2;
+    return true;
+}
 
-        DrawRectangle(0, 0, screen_width, screen_height, { 10, 10, 10, 150 }); 
-        DrawRectangle(menu_x, menu_y, menu_w, menu_h, { 40, 25, 30, 255 }); // Slight red tint
-        DrawRectangleLines(menu_x, menu_y, menu_w, menu_h, { 200, 100, 100, 255 });
-
-        DrawText("COMPUTE ENGINE SELECTION", menu_x + menu_w/2 - MeasureText("COMPUTE ENGINE SELECTION", 20)/2, menu_y + 20, 20, WHITE);
-        
-        Color col1 = (config.mode == SimMode::QUANTUM) ? Color{ 255, 100, 100, 255 } : GRAY;
-        DrawText("[1] Quantum Walk Virtual Machine", menu_x + 50, menu_y + 80, 20, col1);
-
-        Color col2 = (config.mode == SimMode::CLASSICAL) ? Color{ 255, 100, 100, 255 } : GRAY;
-        DrawText("[2] Classical Diffusion Engine", menu_x + 50, menu_y + 120, 20, col2);
-
-        DrawText("Press M to close and resume", menu_x + menu_w/2 - MeasureText("Press M to close and resume", 15)/2, menu_y + 170, 15, LIGHTGRAY);
+float Simulator2D::total_probability() const {
+    float sum = 0.0f;
+    int total = config.resolution * config.resolution;
+    for (int i = 0; i < total; i++) {
+        sum += std::norm(amp_N[i]) + std::norm(amp_S[i]) + std::norm(amp_E[i]) +
+               std::norm(amp_W[i]) + std::norm(amp_C[i]);
     }
+    return sum;
 }
 
 void Simulator2D::inject_dataset(const std::vector<ViralHotspot>& dataset) {
     int N = config.resolution;
-    
+
     std::fill(amp_N.begin(), amp_N.end(), std::complex<float>(0.0f, 0.0f));
     std::fill(amp_S.begin(), amp_S.end(), std::complex<float>(0.0f, 0.0f));
     std::fill(amp_E.begin(), amp_E.end(), std::complex<float>(0.0f, 0.0f));
     std::fill(amp_W.begin(), amp_W.end(), std::complex<float>(0.0f, 0.0f));
+    std::fill(amp_C.begin(), amp_C.end(), std::complex<float>(0.0f, 0.0f));
     std::fill(prev_probs.begin(), prev_probs.end(), 0.0f);
 
     float min_lat = config.min_lat;
@@ -603,16 +463,25 @@ void Simulator2D::inject_dataset(const std::vector<ViralHotspot>& dataset) {
     float max_lon = config.max_lon;
 
     historical_dataset = dataset;
-    max_historical_cases = 1; 
-    max_seed_cases = 1.0f; 
+    max_historical_cases = 1;
+    max_seed_cases = 1.0f;
 
-    for (const auto& point : dataset) {
-        if (point.lat < min_lat || point.lat > max_lat || point.lon < min_lon || point.lon > max_lon) continue; 
-        
-        if (!point.cases_history.empty()) {
-            if (point.cases_history[0] > max_seed_cases) {
-                max_seed_cases = point.cases_history[0];
-            }
+    // Eligible day-0 seed sites (physics only). Historical maps always use full data.
+    struct SeedCand {
+        size_t index;
+        int day0_cases;
+    };
+    std::vector<SeedCand> seed_cands;
+    seed_cands.reserve(dataset.size());
+
+    for (size_t pi = 0; pi < dataset.size(); ++pi) {
+        const auto& point = dataset[pi];
+        if (point.lat < min_lat || point.lat > max_lat || point.lon < min_lon || point.lon > max_lon) {
+            continue;
+        }
+
+        if (!point.cases_history.empty() && point.cases_history[0] > 0) {
+            seed_cands.push_back(SeedCand{pi, point.cases_history[0]});
         }
 
         for (int cases : point.cases_history) {
@@ -622,10 +491,47 @@ void Simulator2D::inject_dataset(const std::vector<ViralHotspot>& dataset) {
         }
     }
 
+    std::sort(seed_cands.begin(), seed_cands.end(),
+              [](const SeedCand& a, const SeedCand& b) {
+                  if (a.day0_cases != b.day0_cases) return a.day0_cases > b.day0_cases;
+                  return a.index < b.index;
+              });
+
+    size_t keep_n = seed_cands.size();
+    if (config.seed_keep_fraction < 1.0f && !seed_cands.empty()) {
+        keep_n = static_cast<size_t>(std::ceil(
+            static_cast<double>(seed_cands.size()) * static_cast<double>(config.seed_keep_fraction)));
+        if (keep_n < 1) keep_n = 1;
+        if (keep_n > seed_cands.size()) keep_n = seed_cands.size();
+    }
+    std::vector<char> seed_keep(dataset.size(), 0);
+    for (size_t i = 0; i < keep_n; ++i) {
+        seed_keep[seed_cands[i].index] = 1;
+        if (seed_cands[i].day0_cases > max_seed_cases) {
+            max_seed_cases = static_cast<float>(seed_cands[i].day0_cases);
+        }
+    }
+    // fraction==1 preserves legacy max_seed over all in-bounds day-0 cases
+    if (config.seed_keep_fraction >= 1.0f) {
+        max_seed_cases = 1.0f;
+        for (const auto& point : dataset) {
+            if (point.lat < min_lat || point.lat > max_lat || point.lon < min_lon || point.lon > max_lon) {
+                continue;
+            }
+            if (!point.cases_history.empty() && point.cases_history[0] > max_seed_cases) {
+                max_seed_cases = static_cast<float>(point.cases_history[0]);
+            }
+        }
+        std::fill(seed_keep.begin(), seed_keep.end(), 1);
+    }
+
     historical_probs.assign(N * N, 0.0f);
 
-    for (const auto& point : dataset) {
-        if (point.lat < min_lat || point.lat > max_lat || point.lon < min_lon || point.lon > max_lon) continue; 
+    for (size_t pi = 0; pi < dataset.size(); ++pi) {
+        const auto& point = dataset[pi];
+        if (point.lat < min_lat || point.lat > max_lat || point.lon < min_lon || point.lon > max_lon) {
+            continue;
+        }
 
         float pct_x = (point.lon - min_lon) / (max_lon - min_lon);
         float pct_y = (max_lat - point.lat) / (max_lat - min_lat);
@@ -640,50 +546,52 @@ void Simulator2D::inject_dataset(const std::vector<ViralHotspot>& dataset) {
             float hist_weight = 0.0f;
 
             if (!point.cases_history.empty()) {
-                physics_weight = static_cast<float>(point.cases_history[0]) / max_seed_cases;
-                hist_weight = static_cast<float>(point.cases_history[0]) / static_cast<float>(max_historical_cases);
+                hist_weight = static_cast<float>(point.cases_history[0]) /
+                              static_cast<float>(max_historical_cases);
+                if (seed_keep[pi]) {
+                    physics_weight = static_cast<float>(point.cases_history[0]) / max_seed_cases;
+                }
             }
-            
+
             float magnitude = 0.5f * std::sqrt(physics_weight);
 
+            if (physics_weight > 0.0f) {
             if (config.nodal_retention) {
                 amp_C[idx] += std::complex<float>(std::sqrt(physics_weight), 0.0f);
             } else {
-                // --- NEW FIX: Day 0 matches the UI UI toggle! ---
-                const std::complex<float> I(0.0f, 1.0f);
-                
-                switch(config.init_state_2d) {
+                switch (config.init_state_2d) {
                     case InitialState2D::PURE_NORTH:
                         amp_N[idx] += std::complex<float>(magnitude * 2.0f, 0.0f);
                         break;
                     case InitialState2D::UNIFORM:
-                        amp_N[idx] += std::complex<float>(magnitude, 0.0f); 
+                        amp_N[idx] += std::complex<float>(magnitude, 0.0f);
                         amp_S[idx] += std::complex<float>(magnitude, 0.0f);
-                        amp_E[idx] += std::complex<float>(magnitude, 0.0f); 
+                        amp_E[idx] += std::complex<float>(magnitude, 0.0f);
                         amp_W[idx] += std::complex<float>(magnitude, 0.0f);
                         break;
                     case InitialState2D::ALTERNATING_PHASE:
-                        amp_N[idx] += std::complex<float>(magnitude, 0.0f); 
+                        amp_N[idx] += std::complex<float>(magnitude, 0.0f);
                         amp_S[idx] += std::complex<float>(-magnitude, 0.0f);
-                        amp_E[idx] += std::complex<float>(magnitude, 0.0f); 
+                        amp_E[idx] += std::complex<float>(magnitude, 0.0f);
                         amp_W[idx] += std::complex<float>(-magnitude, 0.0f);
                         break;
                     case InitialState2D::CHIRAL_WEST:
-                        amp_N[idx] += std::complex<float>(magnitude, 0.0f); 
+                        amp_N[idx] += std::complex<float>(magnitude, 0.0f);
                         amp_S[idx] += std::complex<float>(0.0f, magnitude);
-                        amp_E[idx] += std::complex<float>(-magnitude, 0.0f); 
+                        amp_E[idx] += std::complex<float>(-magnitude, 0.0f);
                         amp_W[idx] += std::complex<float>(0.0f, -magnitude);
                         break;
                     case InitialState2D::HADAMARD_SYMMETRIC:
-                        amp_N[idx] += std::complex<float>(magnitude, 0.0f);  
+                        amp_N[idx] += std::complex<float>(magnitude, 0.0f);
                         amp_S[idx] += std::complex<float>(0.0f, magnitude);
-                        amp_E[idx] += std::complex<float>(0.0f, magnitude); 
+                        amp_E[idx] += std::complex<float>(0.0f, magnitude);
                         amp_W[idx] += std::complex<float>(-magnitude, 0.0f);
                         break;
                 }
             }
 
-            prev_probs[idx] = physics_weight; 
+            prev_probs[idx] = physics_weight;
+            }
             historical_probs[idx] = std::min(historical_probs[idx] + hist_weight, 1.0f);
         }
     }
@@ -700,7 +608,9 @@ void Simulator2D::inject_landscape(const std::vector<GeoNode>& pop_data) {
     int max_pop = 0;
 
     for (const auto& point : pop_data) {
-        if (point.lat < min_lat || point.lat > max_lat || point.lon < min_lon || point.lon > max_lon) continue; 
+        if (point.lat < min_lat || point.lat > max_lat || point.lon < min_lon || point.lon > max_lon) {
+            continue;
+        }
 
         float pct_x = (point.lon - min_lon) / (max_lon - min_lon);
         float pct_y = (max_lat - point.lat) / (max_lat - min_lat);
@@ -711,7 +621,6 @@ void Simulator2D::inject_landscape(const std::vector<GeoNode>& pop_data) {
         if (grid_x >= 0 && grid_x < N && grid_y >= 0 && grid_y < N) {
             int idx = grid_y * N + grid_x;
             grid_population[idx] += point.population;
-            
             if (grid_population[idx] > max_pop) max_pop = grid_population[idx];
         }
     }
@@ -730,15 +639,63 @@ void Simulator2D::inject_landscape(const std::vector<GeoNode>& pop_data) {
 }
 
 void Simulator2D::load_ascii_mask(const std::string& filepath) {
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        std::cout << "\n[!] ERROR: Could not find '" << filepath << "'! Defaulting to Waterless Earth.\n\n";
-        land_mask.assign(config.resolution * config.resolution, 1.0f);
-        node_growth_rate.assign(config.resolution * config.resolution, config.base_survival_rate);
+    std::string key = make_landscape_cache_key(filepath, config);
+    {
+        std::lock_guard<std::mutex> lock(landscape_cache_mutex_);
+        auto it = landscape_cache_.find(key);
+        if (it != landscape_cache_.end()) {
+            land_mask = it->second.land_mask;
+            node_growth_rate = it->second.node_growth_rate;
+            node_capacity = it->second.node_capacity;
+            return;
+        }
+    }
+
+    // Persistent disk cache for projected grids (avoids re-reading ~200MB ASC per process).
+    auto disk_path_for = [&](const std::string& tag) {
+        std::hash<std::string> h;
+        std::ostringstream name;
+        name << "data/.landscape_cache/" << std::hex << h(key) << "_" << tag << ".bin";
+        return name.str();
+    };
+
+    auto try_load_disk = [&]() -> bool {
+        std::ifstream lm(disk_path_for("mask"), std::ios::binary);
+        std::ifstream gr(disk_path_for("growth"), std::ios::binary);
+        std::ifstream cp(disk_path_for("cap"), std::ios::binary);
+        if (!lm || !gr || !cp) return false;
+        int N = config.resolution;
+        int total = N * N;
+        land_mask.resize(total);
+        node_growth_rate.resize(total);
+        node_capacity.resize(total);
+        lm.read(reinterpret_cast<char*>(land_mask.data()), sizeof(float) * total);
+        gr.read(reinterpret_cast<char*>(node_growth_rate.data()), sizeof(float) * total);
+        cp.read(reinterpret_cast<char*>(node_capacity.data()), sizeof(float) * total);
+        return lm && gr && cp;
+    };
+
+    if (try_load_disk()) {
+        LandscapeCacheEntry entry;
+        entry.land_mask = land_mask;
+        entry.node_growth_rate = node_growth_rate;
+        entry.node_capacity = node_capacity;
+        std::lock_guard<std::mutex> lock(landscape_cache_mutex_);
+        landscape_cache_[key] = std::move(entry);
         return;
     }
 
-    std::cout << "\n[+] SUCCESS: NASA Population Map found and loading...\n\n";
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        std::cerr << "\n[!] ERROR: Could not find '" << filepath
+                  << "'! Defaulting to uniform land with synthetic capacity.\n\n";
+        int N = config.resolution;
+        land_mask.assign(N * N, 1.0f);
+        node_growth_rate.assign(N * N, config.base_survival_rate);
+        // Synthetic capacity keeps OPEN-mode logistic growth usable without NASA ASC.
+        node_capacity.assign(N * N, 1.0e6f);
+        return;
+    }
 
     std::string label;
     int ncols, nrows;
@@ -752,7 +709,7 @@ void Simulator2D::load_ascii_mask(const std::string& filepath) {
     file >> label >> nodata;
 
     std::vector<std::vector<float>> raw_grid(nrows, std::vector<float>(ncols));
-    float max_pop = 0.0f; // Track the highest population in the world
+    float max_pop = 0.0f;
 
     for (int r = 0; r < nrows; r++) {
         for (int c = 0; c < ncols; c++) {
@@ -766,41 +723,63 @@ void Simulator2D::load_ascii_mask(const std::string& filepath) {
 
     int N = config.resolution;
     land_mask.assign(N * N, 0.0f);
-    node_growth_rate.assign(N * N, config.base_survival_rate); 
+    node_growth_rate.assign(N * N, config.base_survival_rate);
     node_capacity.assign(N * N, 0.0f);
-    
-    float max_lat_asc = yllcorner + (nrows * cellsize); 
-    float log_max = std::log10(max_pop + 1.0f); 
+
+    float max_lat_asc = yllcorner + (nrows * cellsize);
+    float log_max = std::log10(max_pop + 1.0f);
 
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
             int idx = y * N + x;
-            
+
             float lon = config.min_lon + (x / (float)(N - 1)) * (config.max_lon - config.min_lon);
             float lat = config.max_lat - (y / (float)(N - 1)) * (config.max_lat - config.min_lat);
 
-            int asc_c = (lon - xllcorner) / cellsize;
-            int asc_r = (max_lat_asc - lat) / cellsize; 
+            int asc_c = static_cast<int>((lon - xllcorner) / cellsize);
+            int asc_r = static_cast<int>((max_lat_asc - lat) / cellsize);
 
             if (asc_r >= 0 && asc_r < nrows && asc_c >= 0 && asc_c < ncols) {
                 float cell_value = raw_grid[asc_r][asc_c];
-                
+
                 if (cell_value < 0.0f || cell_value == nodata) {
                     land_mask[idx] = 0.0f;
                     node_growth_rate[idx] = 0.0f;
-                    node_capacity[idx] = 0.0f; 
+                    node_capacity[idx] = 0.0f;
                 } else {
                     land_mask[idx] = 1.0f;
                     node_capacity[idx] = cell_value;
-
                     float log_pop = std::log10(cell_value + 1.0f);
                     float pop_ratio = log_pop / log_max;
-                    
                     node_growth_rate[idx] = config.base_survival_rate + (config.urban_multiplier * pop_ratio);
                 }
             } else {
-                land_mask[idx] = 0.0f; 
+                land_mask[idx] = 0.0f;
             }
         }
     }
+
+    LandscapeCacheEntry entry;
+    entry.land_mask = land_mask;
+    entry.node_growth_rate = node_growth_rate;
+    entry.node_capacity = node_capacity;
+
+    {
+        std::lock_guard<std::mutex> lock(landscape_cache_mutex_);
+        landscape_cache_[key] = entry;
+    }
+
+    // Best-effort disk cache write
+    (void)std::system("mkdir -p data/.landscape_cache");
+    auto write_bin = [&](const std::string& tag, const std::vector<float>& data) {
+        std::hash<std::string> h;
+        std::ostringstream name;
+        name << "data/.landscape_cache/" << std::hex << h(key) << "_" << tag << ".bin";
+        std::ofstream out(name.str(), std::ios::binary);
+        if (!out) return;
+        out.write(reinterpret_cast<const char*>(data.data()), sizeof(float) * data.size());
+    };
+    write_bin("mask", land_mask);
+    write_bin("growth", node_growth_rate);
+    write_bin("cap", node_capacity);
 }

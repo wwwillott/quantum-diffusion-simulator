@@ -1,0 +1,15 @@
+.DS_Store
+.vscode/
+1D/build/
+1D/build-*/
+1D/diffusion_sim
+1D/headless_runner
+1D/engine_tests
+1D/data/nasa_pop.asc
+1D/data/.landscape_cache/
+1D/results/
+1D/optimizer/.venv/
+1D/optimizer/.pytest_cache/
+1D/optimizer/**/*.egg-info/
+1D/optimizer/**/__pycache__/
+*.o
